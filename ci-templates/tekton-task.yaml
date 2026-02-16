@@ -1,0 +1,219 @@
+# AgentGuard - Tekton CI/CD Template
+# Shift-Left Security Testing for AI Agents
+#
+# Standalone redistributable template for integrating AgentGuard
+# into any Tekton-based CI/CD pipeline.
+#
+# Usage:
+#   kubectl apply -f tekton-task.yaml
+#   tkn pipeline start agentguard-ci-pipeline --showlog
+#
+# Prerequisites:
+#   - AgentGuard Scanner running at scanner-url
+#   - Target agent running at target-url
+
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentguard-full-scan
+  labels:
+    app.kubernetes.io/part-of: agentguard
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/displayName: "AgentGuard Security Scan"
+    tekton.dev/categories: Security
+    tekton.dev/tags: ai-agent,security,shift-left
+spec:
+  description: |
+    Runs AgentGuard security scan including attack pattern testing
+    and canary injection against a target AI agent.
+    Returns pass/fail for CI/CD gate integration.
+
+  params:
+    - name: target-url
+      type: string
+      description: URL of the target agent to scan
+      default: "http://target-agent:8001"
+    - name: scanner-url
+      type: string
+      description: URL of the AgentGuard scanner service
+      default: "http://agentguard-scanner:8000"
+    - name: categories
+      type: string
+      description: Comma-separated attack categories to test
+      default: "prompt_injection,tool_abuse,memory_poisoning,cross_agent_escalation,data_exfiltration,goal_hijacking"
+    - name: detection-threshold
+      type: string
+      description: Minimum detection rate to pass (0.0-1.0)
+      default: "0.90"
+    - name: canary-count
+      type: string
+      description: Number of canary tokens to inject
+      default: "5"
+    - name: enable-canary
+      type: string
+      description: Enable canary injection test (true/false)
+      default: "true"
+
+  results:
+    - name: scan-id
+      description: Unique scan identifier
+    - name: detection-rate
+      description: Overall detection rate
+    - name: ci-gate
+      description: PASS or FAIL
+    - name: total-patterns
+      description: Total attack patterns tested
+    - name: successful-attacks
+      description: Number of successful attacks
+    - name: canary-leaked
+      description: Number of leaked canary tokens
+
+  steps:
+    - name: wait-for-services
+      image: python:3.11-alpine
+      script: |
+        #!/bin/sh
+        apk add --no-cache curl > /dev/null 2>&1
+        echo "Waiting for services to be ready..."
+
+        for i in $(seq 1 30); do
+          SCANNER=$(curl -s -o /dev/null -w "%{http_code}" "$(params.scanner-url)/health" 2>/dev/null || echo "000")
+          TARGET=$(curl -s -o /dev/null -w "%{http_code}" "$(params.target-url)/health" 2>/dev/null || echo "000")
+
+          if [ "${SCANNER}" = "200" ] && [ "${TARGET}" = "200" ]; then
+            echo "All services ready!"
+            exit 0
+          fi
+          echo "  Attempt ${i}/30 - Scanner: ${SCANNER}, Target: ${TARGET}"
+          sleep 2
+        done
+        echo "ERROR: Services not ready after 60 seconds"
+        exit 1
+
+    - name: run-attack-scan
+      image: python:3.11-alpine
+      script: |
+        #!/bin/sh
+        set -e
+        apk add --no-cache curl > /dev/null 2>&1
+
+        SCANNER_URL="$(params.scanner-url)"
+        TARGET_URL="$(params.target-url)"
+        CATEGORIES="$(params.categories)"
+        THRESHOLD="$(params.detection-threshold)"
+
+        echo "=== AgentGuard Attack Pattern Scan ==="
+        CATS_JSON=$(echo "${CATEGORIES}" | sed 's/,/","/g' | sed 's/^/["/' | sed 's/$/"]/')
+
+        RESULT=$(curl -s -X POST "${SCANNER_URL}/scan" \
+          -H "Content-Type: application/json" \
+          -d "{\"target_url\": \"${TARGET_URL}\", \"categories\": ${CATS_JSON}}")
+
+        echo "${RESULT}" | python3 -m json.tool 2>/dev/null || echo "${RESULT}"
+
+        SCAN_ID=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['scan_id'])")
+        DETECTION_RATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['detection_rate'])")
+        CI_GATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['ci_gate'])")
+        TOTAL=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['total_patterns'])")
+        SUCCESSFUL=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['successful_attacks'])")
+
+        echo -n "${SCAN_ID}" > $(results.scan-id.path)
+        echo -n "${DETECTION_RATE}" > $(results.detection-rate.path)
+        echo -n "${CI_GATE}" > $(results.ci-gate.path)
+        echo -n "${TOTAL}" > $(results.total-patterns.path)
+        echo -n "${SUCCESSFUL}" > $(results.successful-attacks.path)
+
+        echo "Detection Rate: ${DETECTION_RATE}, CI Gate: ${CI_GATE}"
+
+        PASS=$(python3 -c "print('yes' if float('${DETECTION_RATE}') >= float('${THRESHOLD}') else 'no')")
+        if [ "${PASS}" = "no" ]; then
+          echo "FAILED: Detection rate below threshold"
+          exit 1
+        fi
+
+    - name: run-canary-injection
+      image: python:3.11-alpine
+      script: |
+        #!/bin/sh
+        set -e
+        apk add --no-cache curl > /dev/null 2>&1
+
+        ENABLE="$(params.enable-canary)"
+        if [ "${ENABLE}" != "true" ]; then
+          echo "Canary injection disabled."
+          echo -n "0" > $(results.canary-leaked.path)
+          exit 0
+        fi
+
+        SCANNER_URL="$(params.scanner-url)"
+        TARGET_URL="$(params.target-url)"
+        CANARY_COUNT="$(params.canary-count)"
+
+        echo "=== AgentGuard Canary Injection ==="
+
+        RESULT=$(curl -s -X POST "${SCANNER_URL}/canary-inject" \
+          -H "Content-Type: application/json" \
+          -d "{\"target_url\": \"${TARGET_URL}\", \"canary_count\": ${CANARY_COUNT}}")
+
+        echo "${RESULT}" | python3 -m json.tool 2>/dev/null || echo "${RESULT}"
+
+        LEAKED=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['leaked'])")
+        echo -n "${LEAKED}" > $(results.canary-leaked.path)
+
+        if [ "${LEAKED}" -gt "0" ]; then
+          echo "WARNING: ${LEAKED} canary tokens leaked!"
+          exit 1
+        fi
+        echo "PASSED: No canary tokens leaked"
+---
+# Pipeline wrapping the full scan task
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentguard-ci-pipeline
+  labels:
+    app.kubernetes.io/part-of: agentguard
+spec:
+  description: |
+    CI/CD pipeline for AgentGuard security testing.
+    Use this template in your Tekton-based CI/CD system.
+
+  params:
+    - name: target-url
+      type: string
+      default: "http://target-agent:8001"
+    - name: scanner-url
+      type: string
+      default: "http://agentguard-scanner:8000"
+    - name: detection-threshold
+      type: string
+      default: "0.90"
+
+  tasks:
+    - name: security-scan
+      taskRef:
+        name: agentguard-full-scan
+      params:
+        - name: target-url
+          value: $(params.target-url)
+        - name: scanner-url
+          value: $(params.scanner-url)
+        - name: detection-threshold
+          value: $(params.detection-threshold)
+---
+# Example PipelineRun
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: agentguard-ci-
+  labels:
+    app.kubernetes.io/part-of: agentguard
+spec:
+  pipelineRef:
+    name: agentguard-ci-pipeline
+  params:
+    - name: target-url
+      value: "http://target-agent:8001"
+    - name: scanner-url
+      value: "http://agentguard-scanner:8000"

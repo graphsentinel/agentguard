@@ -1,0 +1,118 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.8},
+              {"color": "green", "value": 0.9}
+            ]
+          },
+          "unit": "percentunit",
+          "max": 1
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "Detection Rate",
+      "type": "gauge",
+      "targets": [{"expr": "agentguard_detection_rate", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "CI/CD Gate (1=PASS, 0=FAIL)",
+      "type": "stat",
+      "targets": [{"expr": "agentguard_ci_gate", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Total Scans",
+      "type": "stat",
+      "targets": [{"expr": "agentguard_scans_total", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 8},
+      "id": 4,
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always"
+      },
+      "title": "Detection Rate by Attack Category",
+      "type": "bargauge",
+      "targets": [
+        {"expr": "agentguard_category_detection", "refId": "A", "legendFormat": "{{category}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "id": 5,
+      "title": "Total Attacks per Scan",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "agentguard_attacks_total", "refId": "A", "legendFormat": "{{scan_id}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "AgentGuard"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "id": 6,
+      "title": "Successful Attacks per Scan",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "agentguard_attacks_successful", "refId": "A", "legendFormat": "{{scan_id}}"}
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["agentguard", "security", "ai-agents"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "title": "AgentGuard Security Dashboard",
+  "uid": "agentguard-main",
+  "version": 1
+}

@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentguard-scanner
+  namespace: agentguard-system
+  labels:
+    app: agentguard-scanner
+    app.kubernetes.io/name: agentguard-scanner
+    app.kubernetes.io/part-of: agentguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentguard-scanner
+  template:
+    metadata:
+      labels:
+        app: agentguard-scanner
+    spec:
+      containers:
+        - name: agentguard-scanner
+          image: agentguard-scanner:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PATTERNS_PATH
+              value: "/app/patterns/attack-patterns.json"
+          volumeMounts:
+            - name: patterns
+              mountPath: /app/patterns
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: patterns
+          configMap:
+            name: attack-patterns
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentguard-scanner
+  namespace: agentguard-system
+  labels:
+    app: agentguard-scanner
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: agentguard-scanner
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: attack-patterns
+  namespace: agentguard-system
+  labels:
+    app: agentguard-scanner
+data:
+  attack-patterns.json: |
+    {}

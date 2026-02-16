@@ -1,0 +1,6 @@
+presentation/
+videos/
+patterns/attack-patterns.json
+__pycache__/
+*.pyc
+.env

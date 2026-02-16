@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentguard-trigger-sa
+  namespace: agentguard-system
+  labels:
+    app.kubernetes.io/part-of: agentguard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentguard-trigger-binding
+  namespace: agentguard-system
+subjects:
+  - kind: ServiceAccount
+    name: agentguard-trigger-sa
+    namespace: agentguard-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-roles
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentguard-trigger-cluster-binding
+subjects:
+  - kind: ServiceAccount
+    name: agentguard-trigger-sa
+    namespace: agentguard-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-clusterroles
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: agentguard-trigger-binding
+  namespace: agentguard-system
+  labels:
+    app.kubernetes.io/part-of: agentguard
+spec:
+  params:
+    - name: target-url
+      value: $(body.target_url)
+    - name: scanner-url
+      value: $(body.scanner_url)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: agentguard-trigger-template
+  namespace: agentguard-system
+  labels:
+    app.kubernetes.io/part-of: agentguard
+spec:
+  params:
+    - name: target-url
+      default: "http://target-agent.target-agent.svc.cluster.local:8001"
+    - name: scanner-url
+      default: "http://agentguard-scanner.agentguard-system.svc.cluster.local:8000"
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentguard-triggered-
+        namespace: agentguard-system
+        labels:
+          app.kubernetes.io/part-of: agentguard
+          tekton.dev/trigger: webhook
+      spec:
+        pipelineRef:
+          name: agentguard-security-pipeline
+        params:
+          - name: target-url
+            value: $(tt.params.target-url)
+          - name: scanner-url
+            value: $(tt.params.scanner-url)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: agentguard-listener
+  namespace: agentguard-system
+  labels:
+    app.kubernetes.io/part-of: agentguard
+spec:
+  serviceAccountName: agentguard-trigger-sa
+  triggers:
+    - name: agentguard-webhook
+      bindings:
+        - ref: agentguard-trigger-binding
+      template:
+        ref: agentguard-trigger-template

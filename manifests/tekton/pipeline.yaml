@@ -1,0 +1,99 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentguard-security-pipeline
+  namespace: agentguard-system
+  labels:
+    app.kubernetes.io/part-of: agentguard
+  annotations:
+    tekton.dev/displayName: "AgentGuard Security Pipeline"
+    tekton.dev/categories: Security
+spec:
+  description: |
+    Full AgentGuard security pipeline:
+    1. Preflight checks (service health)
+    2. Attack pattern scan (135 patterns, 6 categories) [parallel]
+    3. Canary injection test (data leak detection) [parallel]
+    4. Final report with OWASP mapping
+
+  params:
+    - name: target-url
+      type: string
+      description: URL of the target agent to scan
+      default: "http://target-agent.target-agent.svc.cluster.local:8001"
+    - name: scanner-url
+      type: string
+      description: URL of the AgentGuard scanner
+      default: "http://agentguard-scanner.agentguard-system.svc.cluster.local:8000"
+    - name: categories
+      type: string
+      description: Comma-separated attack categories
+      default: "prompt_injection,tool_abuse,memory_poisoning,cross_agent_escalation,data_exfiltration,goal_hijacking"
+    - name: detection-threshold
+      type: string
+      description: Minimum detection rate to pass
+      default: "0.90"
+    - name: canary-count
+      type: string
+      description: Number of canary tokens to inject
+      default: "5"
+
+  tasks:
+    # Step 1: Preflight - verify services are up
+    - name: preflight
+      taskRef:
+        name: agentguard-preflight
+      params:
+        - name: target-url
+          value: $(params.target-url)
+        - name: scanner-url
+          value: $(params.scanner-url)
+
+    # Step 2a: Attack Pattern Scan (parallel with canary)
+    - name: attack-scan
+      runAfter:
+        - preflight
+      taskRef:
+        name: agentguard-attack-scan
+      params:
+        - name: target-url
+          value: $(params.target-url)
+        - name: scanner-url
+          value: $(params.scanner-url)
+        - name: categories
+          value: $(params.categories)
+        - name: threshold
+          value: $(params.detection-threshold)
+
+    # Step 2b: Canary Injection (parallel with attack-scan)
+    - name: canary-test
+      runAfter:
+        - preflight
+      taskRef:
+        name: agentguard-canary-test
+      params:
+        - name: target-url
+          value: $(params.target-url)
+        - name: scanner-url
+          value: $(params.scanner-url)
+        - name: canary-count
+          value: $(params.canary-count)
+
+    # Step 3: Final Report
+    - name: report
+      runAfter:
+        - attack-scan
+        - canary-test
+      taskRef:
+        name: agentguard-report
+      params:
+        - name: scanner-url
+          value: $(params.scanner-url)
+        - name: scan-id
+          value: $(tasks.attack-scan.results.scan-id)
+        - name: detection-rate
+          value: $(tasks.attack-scan.results.detection-rate)
+        - name: ci-gate
+          value: $(tasks.attack-scan.results.ci-gate)
+        - name: leaked-canaries
+          value: $(tasks.canary-test.results.leaked)

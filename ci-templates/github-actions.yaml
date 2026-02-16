@@ -1,0 +1,123 @@
+# AgentGuard - GitHub Actions Workflow Template
+# Shift-Left Security Testing for AI Agents
+#
+# Usage: Copy to .github/workflows/agentguard.yaml in your project
+
+name: AgentGuard Security Scan
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+env:
+  AGENTGUARD_VERSION: "0.1.0"
+  DETECTION_THRESHOLD: "0.90"
+  OLLAMA_MODEL: "llama3.2:1b"
+
+jobs:
+  agent-security-scan:
+    name: AI Agent Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup k3d
+        uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: agentguard-ci
+          args: >-
+            --port 8000:8000@loadbalancer
+            --port 8001:8001@loadbalancer
+            --agents 1
+
+      - name: Build Target Agent
+        run: |
+          docker build -t target-agent:latest ./src/target-agent/
+          k3d image import target-agent:latest -c agentguard-ci
+
+      - name: Build AgentGuard Scanner
+        run: |
+          docker build -t agentguard-scanner:latest ./src/agentguard/
+          k3d image import agentguard-scanner:latest -c agentguard-ci
+
+      - name: Deploy Services
+        run: |
+          kubectl apply -f manifests/namespaces/
+          kubectl apply -f manifests/target-agent/
+          kubectl apply -f manifests/agentguard/
+
+          # Create attack patterns ConfigMap
+          kubectl create configmap attack-patterns \
+            --from-file=attack-patterns.json=patterns/attack-patterns.json \
+            -n agentguard-system \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl rollout status deployment/target-agent -n target-agent --timeout=120s
+          kubectl rollout status deployment/agentguard-scanner -n agentguard-system --timeout=120s
+
+      - name: Run Security Scan
+        run: |
+          # Setup port-forwards
+          kubectl port-forward svc/agentguard-scanner -n agentguard-system 8000:8000 &
+          kubectl port-forward svc/target-agent -n target-agent 8001:8001 &
+          sleep 5
+
+          # Run attack pattern scan
+          RESULT=$(curl -s -X POST http://localhost:8000/scan \
+            -H "Content-Type: application/json" \
+            -d '{"target_url": "http://target-agent.target-agent.svc.cluster.local:8001"}')
+
+          echo "Scan Result:"
+          echo "${RESULT}" | python3 -m json.tool
+
+          # Check CI gate
+          GATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['ci_gate'])")
+          RATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['detection_rate'])")
+
+          echo "Detection Rate: ${RATE}"
+          echo "CI Gate: ${GATE}"
+
+          if [ "${GATE}" = "FAIL" ]; then
+            echo "::error::AgentGuard security scan FAILED. Detection rate: ${RATE}"
+            exit 1
+          fi
+
+      - name: Run Canary Injection
+        if: always()
+        run: |
+          RESULT=$(curl -s -X POST http://localhost:8000/canary-inject \
+            -H "Content-Type: application/json" \
+            -d '{"target_url": "http://target-agent.target-agent.svc.cluster.local:8001", "canary_count": 5}')
+
+          echo "Canary Result:"
+          echo "${RESULT}" | python3 -m json.tool
+
+          LEAKED=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['leaked'])")
+          if [ "${LEAKED}" -gt "0" ]; then
+            echo "::warning::${LEAKED} canary tokens leaked!"
+          fi
+
+      - name: Export Metrics
+        if: always()
+        run: |
+          curl -s http://localhost:8000/metrics > agentguard-metrics.txt
+          curl -s http://localhost:8000/results > agentguard-results.json
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentguard-results
+          path: |
+            agentguard-metrics.txt
+            agentguard-results.json
+
+      - name: Cleanup
+        if: always()
+        run: |
+          k3d cluster delete agentguard-ci 2>/dev/null || true

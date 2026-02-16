@@ -1,0 +1,130 @@
+# AgentGuard - GitLab CI Pipeline Template
+# Shift-Left Security Testing for AI Agents
+#
+# Usage: Include in your .gitlab-ci.yml
+
+variables:
+  AGENTGUARD_VERSION: "0.1.0"
+  DETECTION_THRESHOLD: "0.90"
+  OLLAMA_MODEL: "llama3.2:1b"
+  K3D_CLUSTER: "agentguard-ci"
+
+stages:
+  - build
+  - deploy
+  - scan
+  - report
+
+build-images:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t target-agent:latest ./src/target-agent/
+    - docker build -t agentguard-scanner:latest ./src/agentguard/
+    - docker save target-agent:latest > target-agent.tar
+    - docker save agentguard-scanner:latest > agentguard-scanner.tar
+  artifacts:
+    paths:
+      - target-agent.tar
+      - agentguard-scanner.tar
+    expire_in: 1 hour
+
+deploy-testbed:
+  stage: deploy
+  image: alpine:3.19
+  before_script:
+    - apk add --no-cache curl bash kubectl
+    - curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  script:
+    - k3d cluster create ${K3D_CLUSTER} --port 8000:8000@loadbalancer --port 8001:8001@loadbalancer --agents 1 --wait
+    - docker load < target-agent.tar
+    - docker load < agentguard-scanner.tar
+    - k3d image import target-agent:latest agentguard-scanner:latest -c ${K3D_CLUSTER}
+    - kubectl apply -f manifests/namespaces/
+    - kubectl apply -f manifests/target-agent/
+    - kubectl create configmap attack-patterns --from-file=attack-patterns.json=patterns/attack-patterns.json -n agentguard-system --dry-run=client -o yaml | kubectl apply -f -
+    - kubectl apply -f manifests/agentguard/
+    - kubectl rollout status deployment/target-agent -n target-agent --timeout=120s
+    - kubectl rollout status deployment/agentguard-scanner -n agentguard-system --timeout=120s
+
+security-scan:
+  stage: scan
+  image: curlimages/curl:latest
+  script:
+    - |
+      kubectl port-forward svc/agentguard-scanner -n agentguard-system 8000:8000 &
+      sleep 5
+
+      # Run attack pattern scan
+      RESULT=$(curl -s -X POST http://localhost:8000/scan \
+        -H "Content-Type: application/json" \
+        -d '{"target_url": "http://target-agent.target-agent.svc.cluster.local:8001"}')
+
+      echo "Scan Result:"
+      echo "${RESULT}" | python3 -m json.tool
+
+      GATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['ci_gate'])")
+      RATE=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['detection_rate'])")
+
+      echo "${RESULT}" > agentguard-scan.json
+
+      if [ "${GATE}" = "FAIL" ]; then
+        echo "FAILED: Detection rate ${RATE} below threshold"
+        exit 1
+      fi
+  artifacts:
+    paths:
+      - agentguard-scan.json
+    when: always
+
+canary-injection:
+  stage: scan
+  image: curlimages/curl:latest
+  allow_failure: true
+  script:
+    - |
+      kubectl port-forward svc/agentguard-scanner -n agentguard-system 8000:8000 &
+      sleep 5
+
+      RESULT=$(curl -s -X POST http://localhost:8000/canary-inject \
+        -H "Content-Type: application/json" \
+        -d '{"target_url": "http://target-agent.target-agent.svc.cluster.local:8001", "canary_count": 5}')
+
+      echo "Canary Result:"
+      echo "${RESULT}" | python3 -m json.tool
+      echo "${RESULT}" > agentguard-canary.json
+
+      LEAKED=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin)['leaked'])")
+      if [ "${LEAKED}" -gt "0" ]; then
+        echo "WARNING: ${LEAKED} canary tokens leaked!"
+        exit 1
+      fi
+  artifacts:
+    paths:
+      - agentguard-canary.json
+    when: always
+
+generate-report:
+  stage: report
+  image: curlimages/curl:latest
+  when: always
+  script:
+    - |
+      kubectl port-forward svc/agentguard-scanner -n agentguard-system 8000:8000 &
+      sleep 5
+      curl -s http://localhost:8000/metrics > agentguard-metrics.txt
+      curl -s http://localhost:8000/results > agentguard-results.json
+  artifacts:
+    paths:
+      - agentguard-metrics.txt
+      - agentguard-results.json
+    when: always
+
+cleanup:
+  stage: .post
+  image: alpine:3.19
+  when: always
+  script:
+    - k3d cluster delete ${K3D_CLUSTER} 2>/dev/null || true
